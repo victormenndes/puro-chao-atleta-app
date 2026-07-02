@@ -41,6 +41,14 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      // Marcador no User-Agent para o site (pwa-register.tsx) detectar que
+      // está rodando dentro do app nativo e não mostrar o banner de "instalar
+      // o app" (redundante e que sobrepõe conteúdo dentro do próprio app).
+      ..setUserAgent(
+        'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36 '
+        'PuroChaoAtletaApp/1.0',
+      )
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: (_) {
