@@ -1,0 +1,26 @@
+# Segredos de assinatura — NUNCA versionar
+key.properties
+keystore/
+*.jks
+*.keystore
+
+# Flutter/Dart
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/pubspec.lock
+
+# Android (gerado por `flutter create`, regenerado no CI)
+android/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# macOS
+.DS_Store

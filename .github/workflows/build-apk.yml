@@ -1,0 +1,72 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Regenerar android/ (Gradle scaffold sempre atualizado)
+        run: |
+          flutter create --platforms=android \
+            --org br.com.mendestechnology.purochao \
+            --project-name atleta .
+          # `flutter create` num diretório existente só recria os arquivos
+          # de plataforma (android/) sem tocar em lib/ ou pubspec.yaml
+          # customizados já commitados.
+
+      - name: Ajustar label do app no manifest (best-effort, não falha o build)
+        run: |
+          sed -i 's/android:label="atleta"/android:label="Puro Chão — Atleta"/' \
+            android/app/src/main/AndroidManifest.xml || true
+
+      - run: flutter pub get
+
+      - name: Gerar ícone adaptativo e splash screen
+        run: |
+          dart run flutter_launcher_icons
+          dart run flutter_native_splash:create
+
+      - name: Build APK release
+        run: flutter build apk --release
+
+      - name: Localizar e renomear APK gerado
+        run: |
+          APK_PATH=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n1)
+          echo "Encontrado: $APK_PATH"
+          cp "$APK_PATH" purochao-atleta-unsigned.apk
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: purochao-atleta-unsigned
+          path: purochao-atleta-unsigned.apk
+          retention-days: 30
+
+      - name: Publicar Release (download público, sem auth)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          make_latest: true
+          files: purochao-atleta-unsigned.apk
+          body: |
+            APK gerado automaticamente (build ${{ github.run_number }}, commit ${{ github.sha }}).
+
+            **Este APK NÃO é o de produção.** Ele está assinado com a chave de
+            debug pública padrão do Flutter (sem valor de segurança). O
+            servidor baixa este artefato e reassina com a chave de release
+            real antes de disponibilizar para os atletas em
+            static.mendestechnology.com.br.
