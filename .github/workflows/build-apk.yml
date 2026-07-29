@@ -46,6 +46,10 @@ jobs:
 
       - run: flutter pub get
 
+      - run: flutter analyze
+
+      - run: flutter test
+
       - name: Gerar ícone adaptativo e splash screen
         run: |
           dart run flutter_launcher_icons

@@ -8,8 +8,18 @@ import 'services/update_checker.dart';
 import 'services/push_notifications_service.dart';
 
 const String kHost = 'purochao.mendestechnology.com.br';
-const String kStartUrl = 'https://$kHost/atleta/login';
+// Painel, não login: a sessão do atleta é um cookie HttpOnly de 7 dias
+// (purochao-atleta) já validado pelo backend em GET /api/atleta/me. O
+// próprio painel redireciona para /atleta/login se o cookie estiver
+// ausente, expirado ou revogado — abrir direto no login aqui ignorava
+// esse cookie e forçava um novo OTP toda vez que o app era reaberto.
+const String kStartUrl = 'https://$kHost/atleta/painel';
 const List<String> kAllowedPathPrefixes = ['/atleta', '/api/atleta'];
+
+bool isAtletaAppUrlInScope(Uri uri) {
+  if (uri.host != kHost) return false;
+  return kAllowedPathPrefixes.any((p) => uri.path.startsWith(p));
+}
 
 class WebViewScreen extends StatefulWidget {
   const WebViewScreen({super.key});
@@ -23,10 +33,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
   bool _hasError = false;
   bool _isLoading = true;
 
-  bool _isInScope(Uri uri) {
-    if (uri.host != kHost) return false;
-    return kAllowedPathPrefixes.any((p) => uri.path.startsWith(p));
-  }
+  bool _isInScope(Uri uri) => isAtletaAppUrlInScope(uri);
 
   Future<void> _openExternally(Uri uri) async {
     await launchUrl(uri, mode: LaunchMode.externalApplication);
