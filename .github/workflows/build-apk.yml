@@ -25,7 +25,11 @@ jobs:
             --project-name atleta .
           # `flutter create` num diretório existente só recria os arquivos
           # de plataforma (android/) sem tocar em lib/ ou pubspec.yaml
-          # customizados já commitados.
+          # customizados já commitados. Só que ele também grava um
+          # test/widget_test.dart boilerplate (referencia MyApp, classe que
+          # não existe aqui — o app real é AtletaApp) — quebra o flutter
+          # analyze/test se não for removido.
+          rm -f test/widget_test.dart
 
       - name: Ajustar label do app no manifest (best-effort, não falha o build)
         run: |
