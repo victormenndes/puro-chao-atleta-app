@@ -1,24 +1,14 @@
-import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'webview_screen.dart';
 import 'services/push_notifications_service.dart';
 
-// Isolate separado do main() — precisa inicializar o Firebase de novo aqui
-// dentro. FCM já exibe a notificação sozinho neste estado (mensagem sempre
-// tem bloco notification+data — ver sendAthletePush no backend); este
-// handler só existe pra satisfazer o plugin, sem side-effects.
-@pragma('vm:entry-point')
-Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  await Firebase.initializeApp();
-}
-
-Future<void> main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp();
-  FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
-  await PushNotificationsService.instance.initLocalNotifications();
   runApp(const AtletaApp());
+  // Fire-and-forget: push é um extra, nunca pode atrasar ou travar a
+  // primeira tela do app. Qualquer falha (Play Services ausente/antigo,
+  // config do Firebase, etc.) é tratada dentro do próprio serviço.
+  PushNotificationsService.instance.initialize();
 }
 
 class AtletaApp extends StatelessWidget {

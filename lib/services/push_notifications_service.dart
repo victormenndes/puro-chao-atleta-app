@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -7,6 +8,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 const String kPushChannelId = 'purochao_important';
 const String kPushChannelName = 'Avisos da Puro Chão';
 const String _kAskedPrefKey = 'push_permission_asked_v1';
+
+// Isolate separado do main() — precisa inicializar o Firebase de novo aqui
+// dentro. FCM já exibe a notificação sozinho neste estado (mensagem sempre
+// tem bloco notification+data — ver sendAthletePush no backend); este
+// handler só existe pra satisfazer o plugin, sem side-effects.
+@pragma('vm:entry-point')
+Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp();
+}
 
 /// Singleton: inicializa FCM + notificações locais, mantém o token atual e
 /// expõe callbacks pra WebViewScreen entregar o token à página (via ponte
@@ -26,10 +36,26 @@ class PushNotificationsService {
 
   String? _currentToken;
   bool _initialized = false;
+  bool _firebaseReady = false;
 
   String? get currentToken => _currentToken;
 
-  Future<void> initLocalNotifications() async {
+  /// Chamado uma vez, logo após runApp() (nunca antes — não pode atrasar a
+  /// primeira tela). Falha de forma silenciosa: se o Firebase não
+  /// inicializar (Play Services ausente/desatualizado, config inválida
+  /// etc.), o app continua funcionando normalmente, só sem push.
+  Future<void> initialize() async {
+    try {
+      await Firebase.initializeApp();
+      FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+      await _initLocalNotifications();
+      _firebaseReady = true;
+    } catch (_) {
+      _firebaseReady = false;
+    }
+  }
+
+  Future<void> _initLocalNotifications() async {
     const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
     await _localNotifications.initialize(
       settings: const InitializationSettings(android: androidInit),
@@ -62,7 +88,7 @@ class PushNotificationsService {
   /// válida). Registra os listeners uma única vez; se a permissão já
   /// tiver sido concedida antes, obtém e entrega o token sem novo diálogo.
   Future<void> onReachedPainel() async {
-    if (_initialized) return;
+    if (_initialized || !_firebaseReady) return;
     _initialized = true;
 
     FirebaseMessaging.onMessage.listen(_showForegroundNotification);
@@ -85,6 +111,7 @@ class PushNotificationsService {
   /// Só deve ser chamado a partir do diálogo explicativo mostrado pela UI,
   /// quando o usuário toca em "Ativar".
   Future<bool> requestPermissionAndRegister() async {
+    if (!_firebaseReady) return false;
     final settings = await FirebaseMessaging.instance.requestPermission(alert: true, badge: true, sound: true);
     final granted = settings.authorizationStatus == AuthorizationStatus.authorized ||
         settings.authorizationStatus == AuthorizationStatus.provisional;
@@ -123,6 +150,7 @@ class PushNotificationsService {
   /// ou já mostramos nosso diálogo explicativo antes e o usuário disse
   /// "agora não".
   Future<bool> shouldShowPermissionPrompt() async {
+    if (!_firebaseReady) return false;
     final settings = await FirebaseMessaging.instance.getNotificationSettings();
     if (settings.authorizationStatus == AuthorizationStatus.authorized ||
         settings.authorizationStatus == AuthorizationStatus.denied) {
