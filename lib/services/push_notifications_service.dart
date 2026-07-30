@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const String kPushChannelId = 'purochao_important';
@@ -44,9 +45,12 @@ class PushNotificationsService {
 
   String? _currentToken;
   bool _initialized = false;
+  bool _localNotificationsReady = false;
   final Completer<bool> _readyCompleter = Completer<bool>();
+  String? _initializationIssue;
 
   String? get currentToken => _currentToken;
+  String? get initializationIssue => _initializationIssue;
 
   /// Chamado uma vez, logo após runApp() (nunca antes — não pode atrasar a
   /// primeira tela). Falha de forma silenciosa: se o Firebase não
@@ -55,12 +59,36 @@ class PushNotificationsService {
   Future<void> initialize() async {
     try {
       await Firebase.initializeApp();
-      FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
-      await _initLocalNotifications();
-      _readyCompleter.complete(true);
-    } catch (_) {
-      _readyCompleter.complete(false);
+    } catch (error) {
+      _initializationIssue = 'firebase/${_errorCode(error)}';
+      if (!_readyCompleter.isCompleted) _readyCompleter.complete(false);
+      return;
     }
+
+    // Permissão e token FCM não dependem das notificações locais. O build
+    // anterior usava um ícone mipmap inválido no plugin local; essa falha
+    // secundária caía no mesmo catch e marcava todo o Firebase indisponível.
+    if (!_readyCompleter.isCompleted) _readyCompleter.complete(true);
+
+    try {
+      FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+    } catch (error) {
+      _initializationIssue = 'background-handler/${_errorCode(error)}';
+    }
+
+    try {
+      await _initLocalNotifications();
+      _localNotificationsReady = true;
+    } catch (error) {
+      _localNotificationsReady = false;
+      _initializationIssue = 'local-notifications/${_errorCode(error)}';
+    }
+  }
+
+  String _errorCode(Object error) {
+    if (error is FirebaseException) return error.code;
+    if (error is PlatformException) return error.code;
+    return error.runtimeType.toString();
   }
 
   /// A WebView pode chegar em /atleta/painel antes de initialize() terminar
@@ -76,7 +104,7 @@ class PushNotificationsService {
   }
 
   Future<void> _initLocalNotifications() async {
-    const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const androidInit = AndroidInitializationSettings('ic_stat_purochao');
     await _localNotifications.initialize(
       settings: const InitializationSettings(android: androidInit),
       onDidReceiveNotificationResponse: _onLocalNotificationTapped,
@@ -90,8 +118,7 @@ class PushNotificationsService {
     );
     await _localNotifications
         .resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin
-        >()
+            AndroidFlutterLocalNotificationsPlugin>()
         ?.createNotificationChannel(channel);
   }
 
@@ -146,7 +173,7 @@ class PushNotificationsService {
       );
       final granted =
           settings.authorizationStatus == AuthorizationStatus.authorized ||
-          settings.authorizationStatus == AuthorizationStatus.provisional;
+              settings.authorizationStatus == AuthorizationStatus.provisional;
       if (!granted) return PushRegistrationResult.denied;
       return await _fetchAndDeliverToken()
           ? PushRegistrationResult.registered
@@ -169,23 +196,29 @@ class PushNotificationsService {
   }
 
   Future<void> _showForegroundNotification(RemoteMessage message) async {
+    if (!_localNotificationsReady) return;
     final notification = message.notification;
     if (notification == null) return;
-    await _localNotifications.show(
-      id: message.hashCode,
-      title: notification.title,
-      body: notification.body,
-      notificationDetails: const NotificationDetails(
-        android: AndroidNotificationDetails(
-          kPushChannelId,
-          kPushChannelName,
-          channelDescription: 'Avisos e comunicados importantes da academia.',
-          importance: Importance.high,
-          priority: Priority.high,
+    try {
+      await _localNotifications.show(
+        id: message.hashCode,
+        title: notification.title,
+        body: notification.body,
+        notificationDetails: const NotificationDetails(
+          android: AndroidNotificationDetails(
+            kPushChannelId,
+            kPushChannelName,
+            channelDescription: 'Avisos e comunicados importantes da academia.',
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
         ),
-      ),
-      payload: jsonEncode(message.data),
-    );
+        payload: jsonEncode(message.data),
+      );
+    } catch (_) {
+      // A entrega FCM não pode derrubar o app se apenas a renderização local
+      // da mensagem em foreground falhar.
+    }
   }
 
   /// `false` se: já concedida (nada a fazer), ou já mostramos nosso diálogo

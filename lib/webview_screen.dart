@@ -330,7 +330,9 @@ class _WebViewScreenState extends State<WebViewScreen> {
     final ready = await PushNotificationsService.instance.onReachedPainel();
     if (!ready) {
       _pushPermissionFlowStarted = false;
-      _showSnack('Notificações indisponíveis neste aparelho no momento');
+      final issue = PushNotificationsService.instance.initializationIssue ??
+          'tempo de inicialização excedido';
+      _showSnack('Não foi possível iniciar as notificações ($issue)');
       return;
     }
 
