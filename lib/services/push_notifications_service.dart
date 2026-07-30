@@ -8,7 +8,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 const String kPushChannelId = 'purochao_important';
 const String kPushChannelName = 'Avisos da Puro Chão';
-const String _kAskedPrefKey = 'push_permission_asked_v1';
+// v2: v1 pode ter sido gravada como true por engano durante testes desta
+// sessão (o app chegava numa "antessala" de /atleta/painel sem sessão válida
+// antes do redirect pro login, e isso corria a lógica de pedir permissão
+// cedo demais). Troca de chave dá uma nova chance limpa em todo aparelho.
+const String _kAskedPrefKey = 'push_permission_asked_v2';
 
 // Isolate separado do main() — precisa inicializar o Firebase de novo aqui
 // dentro. FCM já exibe a notificação sozinho neste estado (mensagem sempre

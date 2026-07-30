@@ -26,12 +26,6 @@ bool isAtletaAppUrlInScope(Uri uri) {
   return kAllowedPathPrefixes.any((p) => path == p || path.startsWith('$p/'));
 }
 
-// Diagnóstico temporário — dois fixes seguidos não resolveram o diálogo de
-// permissão nunca aparecer. Em vez de tentar um terceiro fix às cegas sem
-// acesso a logcat do aparelho real, isso mostra SnackBars com cada etapa do
-// fluxo pra achar exatamente onde trava. Remover depois de confirmado.
-const bool kPushDebugLogging = true;
-
 const Set<String> kAllowedExternalSchemes = {'https', 'tel', 'mailto', 'whatsapp'};
 
 bool isExternalSchemeAllowed(Uri uri) => kAllowedExternalSchemes.contains(uri.scheme.toLowerCase());
@@ -102,7 +96,6 @@ class _WebViewScreenState extends State<WebViewScreen> {
               _isLoading = false;
               _isSlowLoading = false;
             });
-            if (kPushDebugLogging) _showSnack('DEBUG onPageFinished: $url', duration: const Duration(seconds: 5));
             _maybeAskPushPermission(Uri.parse(url));
             _tryDeliverPendingPushToken();
           },
@@ -197,18 +190,38 @@ class _WebViewScreenState extends State<WebViewScreen> {
     super.dispose();
   }
 
-  Future<void> _maybeAskPushPermission(Uri uri) async {
-    if (uri.path != '/atleta/painel') {
-      if (kPushDebugLogging) _showSnack('DEBUG path!=painel: ${uri.path}', duration: const Duration(seconds: 4));
-      return;
+  /// A URL sozinha não prova sessão válida: kStartUrl já é /atleta/painel,
+  /// então onPageFinished dispara com esse path mesmo sem sessão — só depois
+  /// a página descobre via GET /api/atleta/me (401) e redireciona pro login.
+  /// Espera a confirmação real que a página expõe (window.__purochaoAthleteAuthenticated,
+  /// setada só depois que os dados do atleta chegam de verdade).
+  Future<bool> _isAuthenticatedPanelReady() async {
+    try {
+      final result = await _controller.runJavaScriptReturningResult(
+        "window.__purochaoAthleteAuthenticated === true",
+      );
+      return result.toString() == 'true';
+    } catch (_) {
+      return false;
     }
-    if (kPushDebugLogging) _showSnack('DEBUG path==painel, checando push', duration: const Duration(seconds: 4));
+  }
+
+  Future<bool> _waitForAuthenticatedPanel() async {
+    for (var attempt = 0; attempt < 20; attempt++) {
+      if (!mounted) return false;
+      if (await _isAuthenticatedPanelReady()) return true;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+    return false;
+  }
+
+  Future<void> _maybeAskPushPermission(Uri uri) async {
+    if (uri.path != '/atleta/painel') return;
+    if (!await _waitForAuthenticatedPanel() || !mounted) return;
+
     await PushNotificationsService.instance.onReachedPainel();
-    final should = await PushNotificationsService.instance.shouldShowPermissionPrompt();
-    if (kPushDebugLogging) _showSnack('DEBUG shouldShow=$should', duration: const Duration(seconds: 4));
-    if (!should) return;
+    if (!await PushNotificationsService.instance.shouldShowPermissionPrompt()) return;
     if (!mounted) return;
-    await PushNotificationsService.instance.markPermissionPromptShown();
 
     final accepted = await showDialog<bool>(
       context: context,
@@ -225,7 +238,12 @@ class _WebViewScreenState extends State<WebViewScreen> {
         ],
       ),
     );
-    if (accepted == true) {
+    // Só marca "já perguntei" depois de o diálogo realmente resolver — se
+    // `accepted` vier null (widget desmontado, navegação no meio, etc.), não
+    // queima a única tentativa de pedir permissão.
+    if (accepted == null) return;
+    await PushNotificationsService.instance.markPermissionPromptShown();
+    if (accepted) {
       await PushNotificationsService.instance.requestPermissionAndRegister();
     }
   }
