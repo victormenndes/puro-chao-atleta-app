@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:firebase_core/firebase_core.dart';
@@ -36,7 +37,7 @@ class PushNotificationsService {
 
   String? _currentToken;
   bool _initialized = false;
-  bool _firebaseReady = false;
+  final Completer<bool> _readyCompleter = Completer<bool>();
 
   String? get currentToken => _currentToken;
 
@@ -49,10 +50,19 @@ class PushNotificationsService {
       await Firebase.initializeApp();
       FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
       await _initLocalNotifications();
-      _firebaseReady = true;
+      _readyCompleter.complete(true);
     } catch (_) {
-      _firebaseReady = false;
+      _readyCompleter.complete(false);
     }
+  }
+
+  /// A WebView pode chegar em /atleta/painel antes de initialize() terminar
+  /// (corrida entre o boot do app e o carregamento da página). Em vez de só
+  /// checar uma flag, espera o initialize() em andamento resolver — com um
+  /// teto de segurança pra nunca travar o fluxo de permissão indefinidamente
+  /// caso initialize() nunca seja chamado por algum motivo.
+  Future<bool> _waitUntilReady() {
+    return _readyCompleter.future.timeout(const Duration(seconds: 10), onTimeout: () => false);
   }
 
   Future<void> _initLocalNotifications() async {
@@ -88,7 +98,8 @@ class PushNotificationsService {
   /// válida). Registra os listeners uma única vez; se a permissão já
   /// tiver sido concedida antes, obtém e entrega o token sem novo diálogo.
   Future<void> onReachedPainel() async {
-    if (_initialized || !_firebaseReady) return;
+    if (_initialized) return;
+    if (!await _waitUntilReady()) return;
     _initialized = true;
 
     FirebaseMessaging.onMessage.listen(_showForegroundNotification);
@@ -111,7 +122,7 @@ class PushNotificationsService {
   /// Só deve ser chamado a partir do diálogo explicativo mostrado pela UI,
   /// quando o usuário toca em "Ativar".
   Future<bool> requestPermissionAndRegister() async {
-    if (!_firebaseReady) return false;
+    if (!await _waitUntilReady()) return false;
     final settings = await FirebaseMessaging.instance.requestPermission(alert: true, badge: true, sound: true);
     final granted = settings.authorizationStatus == AuthorizationStatus.authorized ||
         settings.authorizationStatus == AuthorizationStatus.provisional;
@@ -150,7 +161,7 @@ class PushNotificationsService {
   /// ou já mostramos nosso diálogo explicativo antes e o usuário disse
   /// "agora não".
   Future<bool> shouldShowPermissionPrompt() async {
-    if (!_firebaseReady) return false;
+    if (!await _waitUntilReady()) return false;
     final settings = await FirebaseMessaging.instance.getNotificationSettings();
     if (settings.authorizationStatus == AuthorizationStatus.authorized ||
         settings.authorizationStatus == AuthorizationStatus.denied) {
