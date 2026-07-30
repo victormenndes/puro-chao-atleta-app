@@ -26,6 +26,12 @@ bool isAtletaAppUrlInScope(Uri uri) {
   return kAllowedPathPrefixes.any((p) => path == p || path.startsWith('$p/'));
 }
 
+// Diagnóstico temporário — dois fixes seguidos não resolveram o diálogo de
+// permissão nunca aparecer. Em vez de tentar um terceiro fix às cegas sem
+// acesso a logcat do aparelho real, isso mostra SnackBars com cada etapa do
+// fluxo pra achar exatamente onde trava. Remover depois de confirmado.
+const bool kPushDebugLogging = true;
+
 const Set<String> kAllowedExternalSchemes = {'https', 'tel', 'mailto', 'whatsapp'};
 
 bool isExternalSchemeAllowed(Uri uri) => kAllowedExternalSchemes.contains(uri.scheme.toLowerCase());
@@ -96,6 +102,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
               _isLoading = false;
               _isSlowLoading = false;
             });
+            if (kPushDebugLogging) _showSnack('DEBUG onPageFinished: $url', duration: const Duration(seconds: 5));
             _maybeAskPushPermission(Uri.parse(url));
             _tryDeliverPendingPushToken();
           },
@@ -191,9 +198,15 @@ class _WebViewScreenState extends State<WebViewScreen> {
   }
 
   Future<void> _maybeAskPushPermission(Uri uri) async {
-    if (uri.path != '/atleta/painel') return; // só perguntamos depois do login, no painel
+    if (uri.path != '/atleta/painel') {
+      if (kPushDebugLogging) _showSnack('DEBUG path!=painel: ${uri.path}', duration: const Duration(seconds: 4));
+      return;
+    }
+    if (kPushDebugLogging) _showSnack('DEBUG path==painel, checando push', duration: const Duration(seconds: 4));
     await PushNotificationsService.instance.onReachedPainel();
-    if (!await PushNotificationsService.instance.shouldShowPermissionPrompt()) return;
+    final should = await PushNotificationsService.instance.shouldShowPermissionPrompt();
+    if (kPushDebugLogging) _showSnack('DEBUG shouldShow=$should', duration: const Duration(seconds: 4));
+    if (!should) return;
     if (!mounted) return;
     await PushNotificationsService.instance.markPermissionPromptShown();
 
