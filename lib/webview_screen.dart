@@ -26,9 +26,15 @@ bool isAtletaAppUrlInScope(Uri uri) {
   return kAllowedPathPrefixes.any((p) => path == p || path.startsWith('$p/'));
 }
 
-const Set<String> kAllowedExternalSchemes = {'https', 'tel', 'mailto', 'whatsapp'};
+const Set<String> kAllowedExternalSchemes = {
+  'https',
+  'tel',
+  'mailto',
+  'whatsapp',
+};
 
-bool isExternalSchemeAllowed(Uri uri) => kAllowedExternalSchemes.contains(uri.scheme.toLowerCase());
+bool isExternalSchemeAllowed(Uri uri) =>
+    kAllowedExternalSchemes.contains(uri.scheme.toLowerCase());
 
 class WebViewScreen extends StatefulWidget {
   const WebViewScreen({super.key});
@@ -47,6 +53,9 @@ class _WebViewScreenState extends State<WebViewScreen> {
   String? _pendingPushToken;
   Timer? _pushBridgeRetryTimer;
   int _pushBridgeAttempts = 0;
+  int _pushRegistrationAttempts = 0;
+  bool _pushPermissionFlowStarted = false;
+  bool _showPushRegistrationFeedback = false;
 
   bool _isInScope(Uri uri) => isAtletaAppUrlInScope(uri);
 
@@ -74,6 +83,14 @@ class _WebViewScreenState extends State<WebViewScreen> {
         'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 '
         '(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36 '
         'PuroChaoAtletaApp/1.0',
+      )
+      // O portal é uma SPA: router.replace() não garante um novo
+      // onPageFinished no WebView. A página usa este canal para avisar
+      // diretamente quando /api/atleta/me confirmou a sessão e quando o
+      // backend persistiu o token FCM.
+      ..addJavaScriptChannel(
+        'PuroChaoNative',
+        onMessageReceived: _handleNativeBridgeMessage,
       )
       ..setNavigationDelegate(
         NavigationDelegate(
@@ -129,7 +146,11 @@ class _WebViewScreenState extends State<WebViewScreen> {
     });
   }
 
-  void _showSnack(String message, {SnackBarAction? action, Duration duration = const Duration(seconds: 3)}) {
+  void _showSnack(
+    String message, {
+    SnackBarAction? action,
+    Duration duration = const Duration(seconds: 3),
+  }) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -138,7 +159,10 @@ class _WebViewScreenState extends State<WebViewScreen> {
         duration: duration,
         content: Text(
           message,
-          style: const TextStyle(color: Color(0xFFF3EFE7), fontWeight: FontWeight.w600),
+          style: const TextStyle(
+            color: Color(0xFFF3EFE7),
+            fontWeight: FontWeight.w600,
+          ),
         ),
         action: action,
       ),
@@ -175,11 +199,15 @@ class _WebViewScreenState extends State<WebViewScreen> {
       return false;
     }
     final now = DateTime.now();
-    if (_lastBackPressAt != null && now.difference(_lastBackPressAt!) < const Duration(seconds: 2)) {
+    if (_lastBackPressAt != null &&
+        now.difference(_lastBackPressAt!) < const Duration(seconds: 2)) {
       return true;
     }
     _lastBackPressAt = now;
-    _showSnack('Toque novamente para sair', duration: const Duration(seconds: 2));
+    _showSnack(
+      'Toque novamente para sair',
+      duration: const Duration(seconds: 2),
+    );
     return false;
   }
 
@@ -215,40 +243,118 @@ class _WebViewScreenState extends State<WebViewScreen> {
     return false;
   }
 
-  Future<void> _maybeAskPushPermission(Uri uri) async {
-    if (uri.path != '/atleta/painel') return;
-    if (!await _waitForAuthenticatedPanel() || !mounted) return;
+  void _handleNativeBridgeMessage(JavaScriptMessage message) {
+    try {
+      final payload = jsonDecode(message.message);
+      if (payload is! Map<String, dynamic>) return;
+      switch (payload['type']) {
+        case 'athlete-authenticated':
+          unawaited(_onAuthenticatedPanel());
+          break;
+        case 'push-token-registered':
+          _pendingPushToken = null;
+          _pushBridgeRetryTimer?.cancel();
+          _pushRegistrationAttempts = 0;
+          if (_showPushRegistrationFeedback) {
+            _showPushRegistrationFeedback = false;
+            _showSnack('Notificações ativadas com sucesso');
+          }
+          break;
+        case 'push-token-registration-failed':
+          // O token continua pendente. A rotina nativa tentará novamente
+          // com intervalo, sem exceder o rate limit do backend.
+          break;
+      }
+    } catch (_) {
+      // Ignora mensagens inválidas: o canal é exclusivo da página permitida,
+      // mas nunca deve quebrar a navegação do portal.
+    }
+  }
 
-    await PushNotificationsService.instance.onReachedPainel();
-    if (!await PushNotificationsService.instance.shouldShowPermissionPrompt()) return;
-    if (!mounted) return;
+  Future<void> _onAuthenticatedPanel() async {
+    if (_pushPermissionFlowStarted) {
+      _tryDeliverPendingPushToken();
+      return;
+    }
+    _pushPermissionFlowStarted = true;
+
+    final ready = await PushNotificationsService.instance.onReachedPainel();
+    if (!ready) {
+      _pushPermissionFlowStarted = false;
+      _showSnack('Notificações indisponíveis neste aparelho no momento');
+      return;
+    }
+
+    if (!await PushNotificationsService.instance.shouldShowPermissionPrompt()) {
+      _tryDeliverPendingPushToken();
+      return;
+    }
+    if (!mounted) {
+      _pushPermissionFlowStarted = false;
+      return;
+    }
 
     final accepted = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF14151D),
-        title: const Text('Ativar notificações?', style: TextStyle(color: Color(0xFFF3EFE7))),
+        title: const Text(
+          'Ativar notificações?',
+          style: TextStyle(color: Color(0xFFF3EFE7)),
+        ),
         content: const Text(
           'Receba avisos importantes da academia direto no seu celular.',
           style: TextStyle(color: Color(0xFFF3EFE7)),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Agora não')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Ativar')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Agora não'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Ativar'),
+          ),
         ],
       ),
     );
-    // Só marca "já perguntei" depois de o diálogo realmente resolver — se
-    // `accepted` vier null (widget desmontado, navegação no meio, etc.), não
-    // queima a única tentativa de pedir permissão.
-    if (accepted == null) return;
-    await PushNotificationsService.instance.markPermissionPromptShown();
-    if (accepted) {
-      await PushNotificationsService.instance.requestPermissionAndRegister();
+    if (accepted == null) {
+      _pushPermissionFlowStarted = false;
+      return;
+    }
+    if (!accepted) {
+      await PushNotificationsService.instance.markPermissionPromptShown();
+      return;
+    }
+
+    _showPushRegistrationFeedback = true;
+    final result = await PushNotificationsService.instance
+        .requestPermissionAndRegister();
+    if (result != PushRegistrationResult.unavailable) {
+      await PushNotificationsService.instance.markPermissionPromptShown();
+    }
+    if (result == PushRegistrationResult.denied) {
+      _showPushRegistrationFeedback = false;
+      _showSnack(
+        'Permissão não concedida. Você pode ativá-la nas configurações do Android.',
+      );
+    } else if (result == PushRegistrationResult.unavailable) {
+      _showPushRegistrationFeedback = false;
+      _pushPermissionFlowStarted = false;
+      _showSnack('Não foi possível registrar este aparelho para notificações.');
     }
   }
 
+  Future<void> _maybeAskPushPermission(Uri uri) async {
+    if (uri.path != '/atleta/painel') return;
+    if (!await _waitForAuthenticatedPanel() || !mounted) return;
+    await _onAuthenticatedPanel();
+  }
+
   void _deliverPushToken(String token) {
+    if (_pendingPushToken != token) {
+      _pushRegistrationAttempts = 0;
+    }
     _pendingPushToken = token;
     _tryDeliverPendingPushToken();
   }
@@ -257,12 +363,20 @@ class _WebViewScreenState extends State<WebViewScreen> {
     if (_pendingPushToken == null) return;
     _pushBridgeRetryTimer?.cancel();
     _pushBridgeAttempts = 0;
-    _pushBridgeRetryTimer = Timer.periodic(const Duration(milliseconds: 800), (timer) async {
+    _pushBridgeRetryTimer = Timer.periodic(const Duration(milliseconds: 800), (
+      timer,
+    ) async {
       _pushBridgeAttempts++;
-      if (_pendingPushToken == null || !mounted) { timer.cancel(); return; }
+      if (_pendingPushToken == null || !mounted) {
+        timer.cancel();
+        return;
+      }
       // ~16s de tentativas; se a página ainda não montou o bridge, desiste
       // até o próximo onPageFinished (reload, navegação, resume do app).
-      if (_pushBridgeAttempts > 20) { timer.cancel(); return; }
+      if (_pushBridgeAttempts > 20) {
+        timer.cancel();
+        return;
+      }
 
       final readyResult = await _controller.runJavaScriptReturningResult(
         "typeof window.__purochaoPushBridgeReady !== 'undefined' && window.__purochaoPushBridgeReady === true",
@@ -270,18 +384,38 @@ class _WebViewScreenState extends State<WebViewScreen> {
       if (readyResult.toString() != 'true') return;
 
       timer.cancel();
+      if (_pushRegistrationAttempts >= 3) {
+        if (_showPushRegistrationFeedback) {
+          _showPushRegistrationFeedback = false;
+          _showSnack(
+            'A permissão foi concedida, mas o aparelho não foi registrado. Tente reabrir o app.',
+          );
+        }
+        return;
+      }
+      _pushRegistrationAttempts++;
       final token = _pendingPushToken!;
       final packageInfo = await PackageInfo.fromPlatform();
-      final js = "window.__purochaoRegisterPushToken && window.__purochaoRegisterPushToken("
+      final js =
+          "window.__purochaoRegisterPushToken && window.__purochaoRegisterPushToken("
           "${jsonEncode(token)}, 'ANDROID', ${jsonEncode(packageInfo.version)})";
       await _controller.runJavaScript(js);
-      _pendingPushToken = null;
+      // Só limpa o token quando a página responder pelo canal nativo que o
+      // POST foi persistido. Sem esse ACK, uma falha HTTP era tratada como
+      // sucesso e o painel continuava sem dispositivo ativo.
+      if (_pendingPushToken != null) {
+        _pushBridgeRetryTimer = Timer(
+          const Duration(seconds: 5),
+          _tryDeliverPendingPushToken,
+        );
+      }
     });
   }
 
   void _navigateToRoute(String route) {
     final uri = Uri.parse('https://$kHost$route');
-    if (!isAtletaAppUrlInScope(uri)) return; // reaproveita a validação já existente
+    if (!isAtletaAppUrlInScope(uri))
+      return; // reaproveita a validação já existente
     if (!mounted) return;
     _controller.loadRequest(uri);
   }
@@ -305,7 +439,8 @@ class _WebViewScreenState extends State<WebViewScreen> {
               : Stack(
                   children: [
                     WebViewWidget(controller: _controller),
-                    if (_isLoading) _BrandLoadingIndicator(showSlowMessage: _isSlowLoading),
+                    if (_isLoading)
+                      _BrandLoadingIndicator(showSlowMessage: _isSlowLoading),
                   ],
                 ),
         ),
@@ -329,8 +464,10 @@ class _BrandLoadingIndicatorState extends State<_BrandLoadingIndicator>
     vsync: this,
     duration: const Duration(milliseconds: 1100),
   )..repeat(reverse: true);
-  late final Animation<double> _opacity = Tween<double>(begin: 0.55, end: 1.0)
-      .animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut));
+  late final Animation<double> _opacity = Tween<double>(
+    begin: 0.55,
+    end: 1.0,
+  ).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut));
 
   @override
   void dispose() {
@@ -346,13 +483,20 @@ class _BrandLoadingIndicatorState extends State<_BrandLoadingIndicator>
         children: [
           FadeTransition(
             opacity: _opacity,
-            child: Image.asset('assets/splash/splash_logo.png', width: 88, height: 88),
+            child: Image.asset(
+              'assets/splash/splash_logo.png',
+              width: 88,
+              height: 88,
+            ),
           ),
           const SizedBox(height: 18),
           const SizedBox(
             width: 22,
             height: 22,
-            child: CircularProgressIndicator(strokeWidth: 2.4, color: Color(0xFF5A82FF)),
+            child: CircularProgressIndicator(
+              strokeWidth: 2.4,
+              color: Color(0xFF5A82FF),
+            ),
           ),
           if (widget.showSlowMessage) ...[
             const SizedBox(height: 16),

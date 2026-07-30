@@ -14,6 +14,8 @@ const String kPushChannelName = 'Avisos da Puro Chão';
 // cedo demais). Troca de chave dá uma nova chance limpa em todo aparelho.
 const String _kAskedPrefKey = 'push_permission_asked_v2';
 
+enum PushRegistrationResult { registered, denied, unavailable }
+
 // Isolate separado do main() — precisa inicializar o Firebase de novo aqui
 // dentro. FCM já exibe a notificação sozinho neste estado (mensagem sempre
 // tem bloco notification+data — ver sendAthletePush no backend); este
@@ -30,7 +32,8 @@ class PushNotificationsService {
   PushNotificationsService._();
   static final PushNotificationsService instance = PushNotificationsService._();
 
-  final FlutterLocalNotificationsPlugin _localNotifications = FlutterLocalNotificationsPlugin();
+  final FlutterLocalNotificationsPlugin _localNotifications =
+      FlutterLocalNotificationsPlugin();
 
   /// Chamado sempre que um token (inicial ou renovado) fica disponível.
   void Function(String token)? onTokenReady;
@@ -66,7 +69,10 @@ class PushNotificationsService {
   /// teto de segurança pra nunca travar o fluxo de permissão indefinidamente
   /// caso initialize() nunca seja chamado por algum motivo.
   Future<bool> _waitUntilReady() {
-    return _readyCompleter.future.timeout(const Duration(seconds: 10), onTimeout: () => false);
+    return _readyCompleter.future.timeout(
+      const Duration(seconds: 10),
+      onTimeout: () => false,
+    );
   }
 
   Future<void> _initLocalNotifications() async {
@@ -83,7 +89,9 @@ class PushNotificationsService {
       importance: Importance.high,
     );
     await _localNotifications
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >()
         ?.createNotificationChannel(channel);
   }
 
@@ -101,13 +109,15 @@ class PushNotificationsService {
   /// Chamado quando a WebView atinge /atleta/painel (sinal de sessão
   /// válida). Registra os listeners uma única vez; se a permissão já
   /// tiver sido concedida antes, obtém e entrega o token sem novo diálogo.
-  Future<void> onReachedPainel() async {
-    if (_initialized) return;
-    if (!await _waitUntilReady()) return;
+  Future<bool> onReachedPainel() async {
+    if (_initialized) return true;
+    if (!await _waitUntilReady()) return false;
     _initialized = true;
 
     FirebaseMessaging.onMessage.listen(_showForegroundNotification);
-    FirebaseMessaging.onMessageOpenedApp.listen((m) => _handleTapPayload(m.data));
+    FirebaseMessaging.onMessageOpenedApp.listen(
+      (m) => _handleTapPayload(m.data),
+    );
     FirebaseMessaging.instance.onTokenRefresh.listen((token) {
       _currentToken = token;
       onTokenReady?.call(token);
@@ -121,24 +131,41 @@ class PushNotificationsService {
         settings.authorizationStatus == AuthorizationStatus.provisional) {
       await _fetchAndDeliverToken();
     }
+    return true;
   }
 
   /// Só deve ser chamado a partir do diálogo explicativo mostrado pela UI,
   /// quando o usuário toca em "Ativar".
-  Future<bool> requestPermissionAndRegister() async {
-    if (!await _waitUntilReady()) return false;
-    final settings = await FirebaseMessaging.instance.requestPermission(alert: true, badge: true, sound: true);
-    final granted = settings.authorizationStatus == AuthorizationStatus.authorized ||
-        settings.authorizationStatus == AuthorizationStatus.provisional;
-    if (granted) await _fetchAndDeliverToken();
-    return granted;
+  Future<PushRegistrationResult> requestPermissionAndRegister() async {
+    if (!await _waitUntilReady()) return PushRegistrationResult.unavailable;
+    try {
+      final settings = await FirebaseMessaging.instance.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+      );
+      final granted =
+          settings.authorizationStatus == AuthorizationStatus.authorized ||
+          settings.authorizationStatus == AuthorizationStatus.provisional;
+      if (!granted) return PushRegistrationResult.denied;
+      return await _fetchAndDeliverToken()
+          ? PushRegistrationResult.registered
+          : PushRegistrationResult.unavailable;
+    } catch (_) {
+      return PushRegistrationResult.unavailable;
+    }
   }
 
-  Future<void> _fetchAndDeliverToken() async {
-    final token = await FirebaseMessaging.instance.getToken();
-    if (token == null) return;
-    _currentToken = token;
-    onTokenReady?.call(token);
+  Future<bool> _fetchAndDeliverToken() async {
+    try {
+      final token = await FirebaseMessaging.instance.getToken();
+      if (token == null) return false;
+      _currentToken = token;
+      onTokenReady?.call(token);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> _showForegroundNotification(RemoteMessage message) async {
@@ -150,7 +177,8 @@ class PushNotificationsService {
       body: notification.body,
       notificationDetails: const NotificationDetails(
         android: AndroidNotificationDetails(
-          kPushChannelId, kPushChannelName,
+          kPushChannelId,
+          kPushChannelName,
           channelDescription: 'Avisos e comunicados importantes da academia.',
           importance: Importance.high,
           priority: Priority.high,
@@ -174,7 +202,8 @@ class PushNotificationsService {
   Future<bool> shouldShowPermissionPrompt() async {
     if (!await _waitUntilReady()) return false;
     final settings = await FirebaseMessaging.instance.getNotificationSettings();
-    if (settings.authorizationStatus == AuthorizationStatus.authorized) return false;
+    if (settings.authorizationStatus == AuthorizationStatus.authorized)
+      return false;
     final prefs = await SharedPreferences.getInstance();
     return !(prefs.getBool(_kAskedPrefKey) ?? false);
   }
