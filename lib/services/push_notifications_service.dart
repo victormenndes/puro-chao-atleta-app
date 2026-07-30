@@ -156,17 +156,21 @@ class PushNotificationsService {
     );
   }
 
-  /// `false` se: já concedida (nada a fazer), recusada no diálogo NATIVO do
-  /// Android (não dá pra pedir de novo por código — só em Configurações),
-  /// ou já mostramos nosso diálogo explicativo antes e o usuário disse
-  /// "agora não".
+  /// `false` se: já concedida (nada a fazer), ou já mostramos nosso diálogo
+  /// explicativo antes (usuário disse "agora não" ou recusou o diálogo
+  /// nativo do Android — não dá pra pedir de novo por código, só em
+  /// Configurações).
+  ///
+  /// IMPORTANTE: no Android, `authorizationStatus` do firebase_messaging só
+  /// distingue authorized/denied — não existe um "nunca pedi" nativo
+  /// (diferente do iOS). Uma permissão NUNCA solicitada também reporta
+  /// `denied`, igual a uma explicitamente recusada. Por isso não dá pra usar
+  /// `denied` aqui pra decidir "não mostra mais" — só a nossa própria flag
+  /// em disco (_kAskedPrefKey) sabe se já perguntamos antes.
   Future<bool> shouldShowPermissionPrompt() async {
     if (!await _waitUntilReady()) return false;
     final settings = await FirebaseMessaging.instance.getNotificationSettings();
-    if (settings.authorizationStatus == AuthorizationStatus.authorized ||
-        settings.authorizationStatus == AuthorizationStatus.denied) {
-      return false;
-    }
+    if (settings.authorizationStatus == AuthorizationStatus.authorized) return false;
     final prefs = await SharedPreferences.getInstance();
     return !(prefs.getBool(_kAskedPrefKey) ?? false);
   }
