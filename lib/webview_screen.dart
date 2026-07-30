@@ -52,8 +52,10 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
   String? _pendingPushToken;
   Timer? _pushBridgeRetryTimer;
+  Timer? _authenticatedPanelPollTimer;
   int _pushBridgeAttempts = 0;
   int _pushRegistrationAttempts = 0;
+  bool _authenticatedPanelCheckInFlight = false;
   bool _pushPermissionFlowStarted = false;
   bool _showPushRegistrationFeedback = false;
 
@@ -134,6 +136,10 @@ class _WebViewScreenState extends State<WebViewScreen> {
       )
       ..loadRequest(Uri.parse(kStartUrl));
 
+    // O login usa router.replace() do Next.js, que não recarrega o
+    // documento e pode não emitir onPageFinished. Mantém uma observação
+    // leve até a própria página confirmar a sessão pelo flag já publicado.
+    _startAuthenticatedPanelPolling();
     _checkForUpdateSoon();
   }
 
@@ -215,6 +221,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
   void dispose() {
     _slowLoadingTimer?.cancel();
     _pushBridgeRetryTimer?.cancel();
+    _authenticatedPanelPollTimer?.cancel();
     super.dispose();
   }
 
@@ -234,13 +241,30 @@ class _WebViewScreenState extends State<WebViewScreen> {
     }
   }
 
-  Future<bool> _waitForAuthenticatedPanel() async {
-    for (var attempt = 0; attempt < 20; attempt++) {
-      if (!mounted) return false;
-      if (await _isAuthenticatedPanelReady()) return true;
-      await Future<void>.delayed(const Duration(milliseconds: 500));
+  void _startAuthenticatedPanelPolling() {
+    _authenticatedPanelPollTimer?.cancel();
+    _authenticatedPanelPollTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => unawaited(_checkAuthenticatedPanel()),
+    );
+    unawaited(_checkAuthenticatedPanel());
+  }
+
+  Future<void> _checkAuthenticatedPanel() async {
+    if (_authenticatedPanelCheckInFlight || !mounted) return;
+    if (_pushPermissionFlowStarted) {
+      _authenticatedPanelPollTimer?.cancel();
+      return;
     }
-    return false;
+
+    _authenticatedPanelCheckInFlight = true;
+    try {
+      if (!await _isAuthenticatedPanelReady()) return;
+      _authenticatedPanelPollTimer?.cancel();
+      await _onAuthenticatedPanel();
+    } finally {
+      _authenticatedPanelCheckInFlight = false;
+    }
   }
 
   void _handleNativeBridgeMessage(JavaScriptMessage message) {
@@ -249,6 +273,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
       if (payload is! Map<String, dynamic>) return;
       switch (payload['type']) {
         case 'athlete-authenticated':
+          _authenticatedPanelPollTimer?.cancel();
           unawaited(_onAuthenticatedPanel());
           break;
         case 'push-token-registered':
@@ -328,8 +353,8 @@ class _WebViewScreenState extends State<WebViewScreen> {
     }
 
     _showPushRegistrationFeedback = true;
-    final result = await PushNotificationsService.instance
-        .requestPermissionAndRegister();
+    final result =
+        await PushNotificationsService.instance.requestPermissionAndRegister();
     if (result != PushRegistrationResult.unavailable) {
       await PushNotificationsService.instance.markPermissionPromptShown();
     }
@@ -347,8 +372,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
   Future<void> _maybeAskPushPermission(Uri uri) async {
     if (uri.path != '/atleta/painel') return;
-    if (!await _waitForAuthenticatedPanel() || !mounted) return;
-    await _onAuthenticatedPanel();
+    await _checkAuthenticatedPanel();
   }
 
   void _deliverPushToken(String token) {
