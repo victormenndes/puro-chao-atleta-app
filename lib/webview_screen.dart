@@ -228,12 +228,36 @@ class _WebViewScreenState extends State<WebViewScreen> {
   /// A URL sozinha não prova sessão válida: kStartUrl já é /atleta/painel,
   /// então onPageFinished dispara com esse path mesmo sem sessão — só depois
   /// a página descobre via GET /api/atleta/me (401) e redireciona pro login.
-  /// Espera a confirmação real que a página expõe (window.__purochaoAthleteAuthenticated,
-  /// setada só depois que os dados do atleta chegam de verdade).
+  /// Confirma a sessão dentro do próprio contexto do WebView. Builds novos
+  /// do painel expõem `window.__purochaoAthleteAuthenticated`; para manter
+  /// compatibilidade com o bundle antigo que ainda está em produção, o app
+  /// também consulta /api/atleta/me usando o cookie HttpOnly da WebView.
   Future<bool> _isAuthenticatedPanelReady() async {
     try {
       final result = await _controller.runJavaScriptReturningResult(
-        "window.__purochaoAthleteAuthenticated === true",
+        r"""
+          (() => {
+            if (window.__purochaoAthleteAuthenticated === true) return true;
+            if (window.location.pathname !== '/atleta/painel') return false;
+            if (window.__purochaoNativeAuthCheckInFlight === true) return false;
+
+            window.__purochaoNativeAuthCheckInFlight = true;
+            fetch('/api/atleta/me', {
+              credentials: 'same-origin',
+              cache: 'no-store'
+            })
+              .then((response) => {
+                if (response.ok) {
+                  window.__purochaoAthleteAuthenticated = true;
+                }
+              })
+              .catch(() => {})
+              .finally(() => {
+                window.__purochaoNativeAuthCheckInFlight = false;
+              });
+            return false;
+          })()
+        """,
       );
       return result.toString() == 'true';
     } catch (_) {
@@ -420,9 +444,26 @@ class _WebViewScreenState extends State<WebViewScreen> {
       _pushRegistrationAttempts++;
       final token = _pendingPushToken!;
       final packageInfo = await PackageInfo.fromPlatform();
-      final js =
-          "window.__purochaoRegisterPushToken && window.__purochaoRegisterPushToken("
-          "${jsonEncode(token)}, 'ANDROID', ${jsonEncode(packageInfo.version)})";
+      final js = """
+          (() => {
+            const register = window.__purochaoRegisterPushToken;
+            if (typeof register !== 'function') return;
+            const reply = (type) => {
+              if (window.PuroChaoNative) {
+                window.PuroChaoNative.postMessage(JSON.stringify({ type }));
+              }
+            };
+            Promise.resolve(register(
+              ${jsonEncode(token)},
+              'ANDROID',
+              ${jsonEncode(packageInfo.version)}
+            ))
+              .then((ok) => reply(ok
+                ? 'push-token-registered'
+                : 'push-token-registration-failed'))
+              .catch(() => reply('push-token-registration-failed'));
+          })()
+          """;
       await _controller.runJavaScript(js);
       // Só limpa o token quando a página responder pelo canal nativo que o
       // POST foi persistido. Sem esse ACK, uma falha HTTP era tratada como
