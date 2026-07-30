@@ -18,35 +18,9 @@ jobs:
         with:
           channel: stable
 
-      - name: Regenerar android/ (Gradle scaffold sempre atualizado)
+      - name: Escrever google-services.json a partir do secret
         run: |
-          flutter create --platforms=android \
-            --org br.com.mendestechnology.purochao \
-            --project-name atleta .
-          # `flutter create` num diretório existente só recria os arquivos
-          # de plataforma (android/) sem tocar em lib/ ou pubspec.yaml
-          # customizados já commitados. Só que ele também grava um
-          # test/widget_test.dart boilerplate (referencia MyApp, classe que
-          # não existe aqui — o app real é AtletaApp) — quebra o flutter
-          # analyze/test se não for removido.
-          rm -f test/widget_test.dart
-
-      - name: Ajustar label do app no manifest (best-effort, não falha o build)
-        run: |
-          sed -i 's/android:label="atleta"/android:label="Puro Chão — Atleta"/' \
-            android/app/src/main/AndroidManifest.xml || true
-
-      - name: Adicionar permissão INTERNET no manifest de release
-        run: |
-          # O template padrão do `flutter create` só inclui INTERNET nos
-          # manifests de debug/profile (android/app/src/{debug,profile}/),
-          # NÃO no main/ que é usado no build de release — sem isso o app
-          # instalado não consegue fazer nenhuma requisição de rede.
-          MANIFEST=android/app/src/main/AndroidManifest.xml
-          if ! grep -q 'android.permission.INTERNET' "$MANIFEST"; then
-            sed -i '0,/<application/s//<uses-permission android:name="android.permission.INTERNET"\/>\n\n    <application/' "$MANIFEST"
-          fi
-          grep -A1 -B1 "INTERNET" "$MANIFEST"
+          echo "${{ secrets.GOOGLE_SERVICES_JSON_B64 }}" | base64 -d > android/app/google-services.json
 
       - run: flutter pub get
 

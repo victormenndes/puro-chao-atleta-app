@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'no_connection_screen.dart';
 import 'services/update_checker.dart';
 import 'services/push_notifications_service.dart';
@@ -42,6 +44,10 @@ class _WebViewScreenState extends State<WebViewScreen> {
   bool _isSlowLoading = false;
   Timer? _slowLoadingTimer;
 
+  String? _pendingPushToken;
+  Timer? _pushBridgeRetryTimer;
+  int _pushBridgeAttempts = 0;
+
   bool _isInScope(Uri uri) => isAtletaAppUrlInScope(uri);
 
   Future<void> _openExternally(Uri uri) async {
@@ -56,8 +62,8 @@ class _WebViewScreenState extends State<WebViewScreen> {
   void initState() {
     super.initState();
 
-    // Estrutura preparada para push (sem efeito real ainda, ver TODOs no service).
-    PushNotificationsService().init();
+    PushNotificationsService.instance.onTokenReady = _deliverPushToken;
+    PushNotificationsService.instance.onNotificationTapped = _navigateToRoute;
 
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
@@ -83,13 +89,15 @@ class _WebViewScreenState extends State<WebViewScreen> {
               _hasError = false;
             });
           },
-          onPageFinished: (_) {
+          onPageFinished: (url) {
             if (!mounted) return;
             _slowLoadingTimer?.cancel();
             setState(() {
               _isLoading = false;
               _isSlowLoading = false;
             });
+            _maybeAskPushPermission(Uri.parse(url));
+            _tryDeliverPendingPushToken();
           },
           onWebResourceError: (error) {
             if (!mounted) return;
@@ -178,7 +186,73 @@ class _WebViewScreenState extends State<WebViewScreen> {
   @override
   void dispose() {
     _slowLoadingTimer?.cancel();
+    _pushBridgeRetryTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _maybeAskPushPermission(Uri uri) async {
+    if (uri.path != '/atleta/painel') return; // só perguntamos depois do login, no painel
+    await PushNotificationsService.instance.onReachedPainel();
+    if (!await PushNotificationsService.instance.shouldShowPermissionPrompt()) return;
+    if (!mounted) return;
+    await PushNotificationsService.instance.markPermissionPromptShown();
+
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF14151D),
+        title: const Text('Ativar notificações?', style: TextStyle(color: Color(0xFFF3EFE7))),
+        content: const Text(
+          'Receba avisos importantes da academia direto no seu celular.',
+          style: TextStyle(color: Color(0xFFF3EFE7)),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Agora não')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Ativar')),
+        ],
+      ),
+    );
+    if (accepted == true) {
+      await PushNotificationsService.instance.requestPermissionAndRegister();
+    }
+  }
+
+  void _deliverPushToken(String token) {
+    _pendingPushToken = token;
+    _tryDeliverPendingPushToken();
+  }
+
+  Future<void> _tryDeliverPendingPushToken() async {
+    if (_pendingPushToken == null) return;
+    _pushBridgeRetryTimer?.cancel();
+    _pushBridgeAttempts = 0;
+    _pushBridgeRetryTimer = Timer.periodic(const Duration(milliseconds: 800), (timer) async {
+      _pushBridgeAttempts++;
+      if (_pendingPushToken == null || !mounted) { timer.cancel(); return; }
+      // ~16s de tentativas; se a página ainda não montou o bridge, desiste
+      // até o próximo onPageFinished (reload, navegação, resume do app).
+      if (_pushBridgeAttempts > 20) { timer.cancel(); return; }
+
+      final readyResult = await _controller.runJavaScriptReturningResult(
+        "typeof window.__purochaoPushBridgeReady !== 'undefined' && window.__purochaoPushBridgeReady === true",
+      );
+      if (readyResult.toString() != 'true') return;
+
+      timer.cancel();
+      final token = _pendingPushToken!;
+      final packageInfo = await PackageInfo.fromPlatform();
+      final js = "window.__purochaoRegisterPushToken && window.__purochaoRegisterPushToken("
+          "${jsonEncode(token)}, 'ANDROID', ${jsonEncode(packageInfo.version)})";
+      await _controller.runJavaScript(js);
+      _pendingPushToken = null;
+    });
+  }
+
+  void _navigateToRoute(String route) {
+    final uri = Uri.parse('https://$kHost$route');
+    if (!isAtletaAppUrlInScope(uri)) return; // reaproveita a validação já existente
+    if (!mounted) return;
+    _controller.loadRequest(uri);
   }
 
   @override
