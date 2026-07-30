@@ -14,8 +14,13 @@ build/
 .pub/
 /pubspec.lock
 
-# Android (gerado por `flutter create`, regenerado no CI)
-android/
+# Android — versionado desde a integração com Firebase (precisa manter
+# google-services.json, plugin Gradle, permissões). O que NÃO versiona:
+android/local.properties
+android/app/google-services.json
+android/.gradle/
+android/app/build/
+android/build/
 
 # IDE
 .idea/
